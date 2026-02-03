@@ -49,7 +49,7 @@ func main() {
     }
 
     // Create auth system with GORM storage
-    authSystem, err := auth.Create(
+    authSystem := auth.Create(
         ag.AsOptions(), // Wire up AuthGorm as the storage backend
         // ... other auth options
     )
@@ -58,6 +58,7 @@ func main() {
     }
 
     // Use authSystem for authentication...
+    _ = authSystem
 }
 ```
 
