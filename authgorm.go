@@ -1,225 +1,141 @@
-// Package authgorm provides a GORM-based implementation for authentication storage.
-// It implements the necessary interfaces for storing and retrieving users, signing keys,
-// and refresh tokens using GORM as the ORM layer.
 package authgorm
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/tpyle/auth"
+	"github.com/tpyle/auth/v2"
 	"gorm.io/gorm"
 )
 
+// Interface checks.
 var (
-	// ErrNotAllKeysDeleted is returned when a delete operation fails to delete all requested signing keys.
-	ErrNotAllKeysDeleted = errors.New("not all signing keys were deleted")
+	_ auth.UserStore           = (*Store)(nil)
+	_ auth.PasswordHashUpdater = (*Store)(nil)
+	_ auth.KeyStore            = (*Store)(nil)
+	_ auth.RefreshTokenStore   = (*Store)(nil)
+	_ auth.RefreshTokenPurger  = (*Store)(nil)
 )
 
-// AuthGorm provides GORM-based storage for authentication data.
-// It manages database operations for users, signing keys, and refresh tokens.
-type AuthGorm struct {
-	dbConnection *gorm.DB
+// defaultPurgeBatchSize is how many rows each statement of
+// PurgeExpiredRefreshTokens deletes.
+const defaultPurgeBatchSize = 1000
+
+// Store implements every auth store interface on one GORM connection. It is
+// safe for concurrent use.
+type Store struct {
+	db             *gorm.DB
+	purgeBatchSize int
 }
 
-// User represents a user in the authentication system.
-// It stores the user's subject identifier and hashed password.
+// New returns a Store that uses db for every operation. Each call passes its
+// context on to db.
+func New(db *gorm.DB) *Store {
+	return &Store{db: db, purgeBatchSize: defaultPurgeBatchSize}
+}
+
+// Migrate creates or updates the tables the store uses (see [User],
+// [SigningKey], [RefreshFamily], [RefreshToken] and [RefreshSubject]). It
+// is safe to call on every start.
+func (s *Store) Migrate(ctx context.Context) error {
+	return s.db.WithContext(ctx).AutoMigrate(
+		&User{},
+		&SigningKey{},
+		&RefreshFamily{},
+		&RefreshToken{},
+		&RefreshSubject{},
+	)
+}
+
+// Options returns the auth options that make an Authorizer use s as its
+// user, key and refresh-token store. Append further options to the result:
+//
+//	auth.New(ctx, append(store.Options(), auth.WithIssuer("me"))...)
+func (s *Store) Options() []auth.Option {
+	return []auth.Option{
+		auth.WithUserStore(s),
+		auth.WithKeyStore(s),
+		auth.WithRefreshTokenStore(s),
+	}
+}
+
+// User is a row of the "users" table.
 type User struct {
 	gorm.Model
 
-	// UserSubject is the unique identifier for the user (could be an email or username).
-	UserSubject string `gorm:"unique,not null"`
-	// HashedPassword is the bcrypt or other hashed password for the user.
+	// UserSubject is the username passed to Authenticate and Login.
+	UserSubject string `gorm:"uniqueIndex;size:255;not null"`
+	// HashedPassword is a PHC-encoded Argon2id hash, as produced by
+	// auth.HashPassword.
 	HashedPassword string `gorm:"not null"`
 }
 
-// SigningKey represents a cryptographic signing key used for JWT token signing.
-// It stores the public key portion of a key pair along with metadata.
+// SigningKey is a row of the "auth_signing_keys" table: the public half of
+// one signing key.
 type SigningKey struct {
-	gorm.Model
-
-	// KeyID is the unique identifier for the signing key.
-	KeyID string `gorm:"unique,not null"`
-	// PublicKey is the binary representation of the ECDSA public key.
+	// ID is the key's UUID, used as the "kid" header of the tokens it signs.
+	ID string `gorm:"primaryKey;size:36"`
+	// PublicKey is the PKIX DER encoding of a P-256 public key.
 	PublicKey []byte `gorm:"not null"`
-	// CreationTime is the Unix timestamp when the key was created.
-	CreationTime int64 `gorm:"not null"`
+	// CreatedAt is when the key was generated.
+	CreatedAt time.Time `gorm:"not null;autoCreateTime:false"`
+	// ExpiresAt is when the key may be deleted. NULL means never.
+	ExpiresAt *time.Time
 }
 
-// RefreshToken represents a long-lived token that can be used to obtain new access tokens.
-// It is associated with a user and contains random data for security.
+// TableName implements GORM's tabler interface.
+func (SigningKey) TableName() string { return "auth_signing_keys" }
+
+// RefreshFamily is a row of the "auth_refresh_families" table: one login
+// session. Revoked families are kept until they expire so that a refresh in
+// flight during the revocation cannot add a token to them.
+type RefreshFamily struct {
+	// ID is the family's UUID.
+	ID string `gorm:"primaryKey;size:36"`
+	// Subject is the user the session belongs to.
+	Subject string `gorm:"size:255;not null;index"`
+	// Revoked is set when the session is logged out or its tokens are reused.
+	Revoked bool `gorm:"not null;default:false"`
+	// ExpiresAt is the latest expiry of any token in the family.
+	ExpiresAt time.Time `gorm:"not null;index"`
+}
+
+// TableName implements GORM's tabler interface.
+func (RefreshFamily) TableName() string { return "auth_refresh_families" }
+
+// RefreshToken is a row of the "auth_refresh_tokens" table: the server-side
+// state of one refresh token.
 type RefreshToken struct {
-	gorm.Model
-
-	// TokenID is the unique identifier for the refresh token.
-	TokenID string `gorm:"unique,not null"`
-	// UserID is the foreign key reference to the User.
-	UserID uint `gorm:"not null"`
-	// User is the associated User record.
-	User User `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
-	// Random contains cryptographically random bytes for token verification.
-	Random []byte `gorm:"not null"`
+	// ID is the token's UUID ("jti" claim).
+	ID string `gorm:"primaryKey;size:36"`
+	// ParentID is the UUID of the token this one replaced, or the nil UUID
+	// for the first token of a login.
+	ParentID string `gorm:"size:36;not null"`
+	// FamilyID references RefreshFamily.ID.
+	FamilyID string `gorm:"size:36;not null;index"`
+	// Subject is the user the token was issued to.
+	Subject string `gorm:"size:255;not null;index"`
+	// IssuedAt is when the token was created.
+	IssuedAt time.Time `gorm:"not null"`
+	// ExpiresAt is when the token can no longer be accepted.
+	ExpiresAt time.Time `gorm:"not null;index"`
+	// UsedAt is when the token was first exchanged. NULL means unused.
+	UsedAt *time.Time
 }
 
-// Migrate runs auto-migration for all authentication-related tables.
-// It creates or updates the User, SigningKey, and RefreshToken tables in the database.
-// Returns an error if the migration fails.
-func (ag *AuthGorm) Migrate() error {
-	return ag.dbConnection.AutoMigrate(&User{}, &SigningKey{}, &RefreshToken{})
+// TableName implements GORM's tabler interface.
+func (RefreshToken) TableName() string { return "auth_refresh_tokens" }
+
+// RefreshSubject is a row of the "auth_refresh_subjects" table. Its only
+// purpose is to be locked: logins and RevokeRefreshTokensForSubject lock the
+// subject's row so that a session cannot be created while all of the
+// subject's sessions are being revoked. Rows are never deleted.
+type RefreshSubject struct {
+	// Subject is the username.
+	Subject string `gorm:"primaryKey;size:255"`
+	// LockedAt is when the row was last locked. It is informational.
+	LockedAt time.Time `gorm:"not null"`
 }
 
-// StoreNewSigningKey stores a new signing key in the database.
-// It converts the key pair's public key to binary format and stores it with its metadata.
-// Returns an error if the key cannot be serialized or stored.
-func (ag *AuthGorm) StoreNewSigningKey(kp *auth.KeyPairWithCreationTime) error {
-	keyBytes, err := kp.GetPublicKeyAsBinary()
-	if err != nil {
-		return err
-	}
-
-	signingKey := SigningKey{
-		KeyID:        kp.ID.String(),
-		PublicKey:    keyBytes,
-		CreationTime: kp.CreationTime.Unix(),
-	}
-
-	err = gorm.G[SigningKey](ag.dbConnection).Create(context.Background(), &signingKey)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// GetSigningKeyByID retrieves a signing key from the database by its ID.
-// It reconstructs the KeyPairWithCreationTime from the stored binary public key data.
-// Returns an error if the key is not found or cannot be deserialized.
-func (ag *AuthGorm) GetSigningKeyByID(keyID uuid.UUID) (*auth.KeyPairWithCreationTime, error) {
-	signingKey, err := gorm.G[SigningKey](ag.dbConnection).Where("key_id = ?", keyID.String()).First(context.Background())
-	if err != nil {
-		return nil, err
-	}
-
-	pk, err := auth.GetECDSAPublicKeyFromBinary(signingKey.PublicKey)
-	if err != nil {
-		return nil, err
-	}
-
-	kp := &auth.KeyPairWithCreationTime{
-		ID:           keyID,
-		PublicKey:    pk,
-		CreationTime: time.Unix(signingKey.CreationTime, 0),
-	}
-
-	return kp, nil
-}
-
-// DeleteSigningKeysByIDs deletes multiple signing keys from the database by their IDs.
-// It verifies that all requested keys were deleted and returns ErrNotAllKeysDeleted if not.
-// This is typically used for removing expired signing keys.
-func (ag *AuthGorm) DeleteSigningKeysByIDs(keyIDs []uuid.UUID) error {
-	var strIDs []string
-	for _, id := range keyIDs {
-		strIDs = append(strIDs, id.String())
-	}
-
-	count, err := gorm.G[SigningKey](ag.dbConnection).Where("key_id IN ?", strIDs).Delete(context.Background())
-	if err != nil {
-		return err
-	}
-
-	if count != len(keyIDs) {
-		return fmt.Errorf("%w: expected %d, got %d", ErrNotAllKeysDeleted, len(keyIDs), count)
-	}
-
-	return nil
-}
-
-// GetPasswordForUserSubject retrieves the hashed password for a user by their subject identifier.
-// The user subject can be an email, username, or other unique identifier.
-// Returns an error if the user is not found.
-func (ag *AuthGorm) GetPasswordForUserSubject(userSubject string) (string, error) {
-	user, err := gorm.G[User](ag.dbConnection).Where("user_subject = ?", userSubject).First(context.Background())
-	if err != nil {
-		return "", err
-	}
-
-	return user.HashedPassword, nil
-}
-
-// GetRefreshTokenByID retrieves a refresh token from the database by its ID.
-// It preloads the associated user data and reconstructs the auth.RefreshToken object.
-// Returns an error if the token is not found or cannot be parsed.
-func (ag *AuthGorm) GetRefreshTokenByID(tokenID uuid.UUID) (*auth.RefreshToken, error) {
-	var refreshToken RefreshToken
-	err := ag.dbConnection.Preload("User").Where("token_id = ?", tokenID.String()).First(&refreshToken).Error
-	if err != nil {
-		return nil, err
-	}
-
-	rtuuid, err := uuid.Parse(refreshToken.TokenID)
-	if err != nil {
-		return nil, err
-	}
-
-	rtData := &auth.RefreshToken{
-		ID:      rtuuid,
-		Subject: refreshToken.User.UserSubject,
-		Rand:    refreshToken.Random,
-	}
-
-	return rtData, nil
-}
-
-// StoreNewRefreshToken stores a new refresh token in the database.
-// Returns an error if the user doesn't exist or the token cannot be stored.
-func (ag *AuthGorm) StoreNewRefreshToken(rt *auth.RefreshToken) error {
-	// Look up the existing user first
-	user, err := gorm.G[User](ag.dbConnection).Where("user_subject = ?", rt.Subject).First(context.Background())
-	if err != nil {
-		return err
-	}
-
-	// Create the refresh token with the existing user's ID
-	refreshToken := RefreshToken{
-		TokenID: rt.ID.String(),
-		Random:  rt.Rand,
-		UserID:  user.ID,
-	}
-
-	return gorm.G[RefreshToken](ag.dbConnection).Create(context.Background(), &refreshToken)
-}
-
-// DeleteRefreshTokenByID deletes a refresh token from the database by its ID.
-// This is typically used when logging out or revoking a refresh token.
-// Returns an error if the deletion fails.
-func (ag *AuthGorm) DeleteRefreshTokenByID(tokenID uuid.UUID) error {
-	_, err := gorm.G[RefreshToken](ag.dbConnection).Where("token_id = ?", tokenID.String()).Delete(context.Background())
-	return err
-}
-
-// NewAuthGorm creates a new AuthGorm instance with the given database connection.
-// The provided GORM database connection will be used for all database operations.
-func NewAuthGorm(dbConnection *gorm.DB) *AuthGorm {
-	return &AuthGorm{
-		dbConnection: dbConnection,
-	}
-}
-
-// AsOptions returns an auth.Option that configures an auth system to use this AuthGorm instance.
-// It wires up all the necessary function callbacks for user lookup, token storage, and key management.
-// This allows AuthGorm to be easily integrated with the auth package.
-func (ag *AuthGorm) AsOptions() auth.Option {
-	return func(options *auth.Options) {
-		options.StoreNewSigningKeyFunc = ag.StoreNewSigningKey
-		options.GetSigningKeyFunc = ag.GetSigningKeyByID
-		options.DeleteExpiredSigningKeysFunc = ag.DeleteSigningKeysByIDs
-		options.LookupUserPasswordFunc = ag.GetPasswordForUserSubject
-		options.LookupRefreshTokenFunc = ag.GetRefreshTokenByID
-		options.StoreRefreshTokenFunc = ag.StoreNewRefreshToken
-		options.DeleteRefreshTokenFunc = ag.DeleteRefreshTokenByID
-	}
-}
+// TableName implements GORM's tabler interface.
+func (RefreshSubject) TableName() string { return "auth_refresh_subjects" }

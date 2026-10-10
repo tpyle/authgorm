@@ -1,163 +1,119 @@
 # authgorm
 
-A GORM-based storage implementation for the [`github.com/tpyle/auth`](https://github.com/tpyle/auth) authentication library. This package provides persistent storage for users, signing keys, and refresh tokens using GORM as the ORM layer.
-
-## Overview
-
-`authgorm` implements the storage interfaces required by the `auth` package, allowing you to store authentication data in any database supported by GORM (PostgreSQL, MySQL, SQLite, SQL Server, etc.).
-
-## Features
-
-- **User Management**: Store and retrieve users with hashed passwords
-- **Signing Key Management**: Persist ECDSA signing keys for JWT token signing
-- **Refresh Token Storage**: Manage long-lived refresh tokens with proper user associations
-- **Flexible Database Support**: Works with any GORM-supported database
-- **Automatic Migrations**: Built-in database schema migration support
-- **Clean Integration**: Seamlessly integrates with the `auth` package via options pattern
+GORM-backed storage for [`github.com/tpyle/auth/v2`](https://github.com/tpyle/auth). One `authgorm.Store` implements every store the auth package uses (`UserStore`, `PasswordHashUpdater`, `KeyStore` and `RefreshTokenStore`) on any database GORM supports. Tokens issued by one instance of your service then verify on every other instance, and sessions survive restarts.
 
 ## Installation
 
 ```bash
-go get github.com/tpyle/authgorm
+go get github.com/tpyle/authgorm github.com/tpyle/auth/v2
 ```
 
-## Quick Start
+Requires Go 1.26 or newer and auth v2.1.0 or newer.
+
+## Quick start
 
 ```go
 package main
 
 import (
-    "github.com/tpyle/auth"
-    "github.com/tpyle/authgorm"
-    "gorm.io/driver/sqlite"
-    "gorm.io/gorm"
+	"context"
+	"log"
+
+	"github.com/tpyle/auth/v2"
+	"github.com/tpyle/authgorm"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 func main() {
-    // Setup database connection
-    db, err := gorm.Open(sqlite.Open("auth.db"), &gorm.Config{})
-    if err != nil {
-        panic(err)
-    }
+	ctx := context.Background()
+	db, err := gorm.Open(postgres.Open("host=localhost user=postgres dbname=app"), &gorm.Config{})
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    // Create AuthGorm instance
-    ag := authgorm.NewAuthGorm(db)
+	store := authgorm.New(db)
+	if err := store.Migrate(ctx); err != nil {
+		log.Fatal(err)
+	}
 
-    // Run migrations
-    if err := ag.Migrate(); err != nil {
-        panic(err)
-    }
+	a, err := auth.New(ctx, append(store.Options(), auth.WithIssuer("my-service"))...)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer a.Close()
 
-    // Create auth system with GORM storage
-    authSystem := auth.Create(
-        ag.AsOptions(), // Wire up AuthGorm as the storage backend
-        // ... other auth options
-    )
-    if err != nil {
-        panic(err)
-    }
+	// Register a user.
+	hash, err := a.HashPassword(ctx, []byte("correct horse battery staple"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := store.SetPasswordHash(ctx, "alice", hash); err != nil {
+		log.Fatal(err)
+	}
 
-    // Use authSystem for authentication...
-    _ = authSystem
+	// Log in.
+	pair, err := a.Login(ctx, "alice", []byte("correct horse battery staple"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	_ = pair
 }
 ```
 
-## Database Schema
+`Store` also implements auth's `RefreshTokenPurger`, so the `Authorizer` deletes expired refresh tokens in the background. No scheduled job is needed.
 
-The library manages three main tables:
+## Passkeys
 
-### Users
-- **user_subject**: Unique identifier (email, username, etc.)
-- **hashed_password**: Bcrypt or other hashed password
+The [`passkeygorm`](passkeygorm/) module does the same for [`github.com/tpyle/auth/passkey`](https://github.com/tpyle/auth/wiki/Passkeys): one `passkeygorm.Store` keeps passkey users, credentials and ceremonies in the same database.
 
-### SigningKeys
-- **key_id**: Unique key identifier (UUID)
-- **public_key**: Binary representation of ECDSA public key
-- **creation_time**: Unix timestamp of key creation
+```go
+passkeys := passkeygorm.New(db)
+if err := passkeys.Migrate(ctx); err != nil {
+	log.Fatal(err)
+}
+pk, err := passkey.New(append(passkeys.Options(),
+	passkey.WithRelyingParty("example.com", "Example", "https://example.com"),
+	passkey.WithTokenIssuer(a),
+)...)
+```
 
-### RefreshTokens
-- **token_id**: Unique token identifier (UUID)
-- **user_id**: Foreign key to users table
-- **random**: Cryptographically random bytes for verification
+It's a separate module (`go get github.com/tpyle/authgorm/passkeygorm`), because the passkey package needs Go 1.27 and a WebAuthn library. See [Passkeys](wiki/Passkeys.md).
 
-All tables include standard GORM fields (`ID`, `CreatedAt`, `UpdatedAt`, `DeletedAt`).
+## Tables
 
-## API Reference
+| Table | Contents |
+|---|---|
+| `users` | Usernames and Argon2id password hashes (unchanged from v0.1) |
+| `auth_signing_keys` | Public halves of signing keys |
+| `auth_refresh_families` | One row per login session, including revoked ones until they expire |
+| `auth_refresh_tokens` | One row per refresh token |
+| `auth_refresh_subjects` | Per-user lock rows that make logins atomic with "revoke all sessions" |
 
-### Core Functions
+## Databases
 
-#### `NewAuthGorm(dbConnection *gorm.DB) *AuthGorm`
-Creates a new AuthGorm instance with the given database connection.
+PostgreSQL and SQLite are tested, including concurrent refresh, logout and revoke races. MySQL is expected to work. For SQLite, open the database with `_txlock=immediate` and a busy timeout. See [Databases and Concurrency](wiki/Databases-and-Concurrency.md).
 
-#### `Migrate() error`
-Runs auto-migration for all authentication-related tables.
+## Documentation
 
-#### `AsOptions() auth.Option`
-Returns an auth.Option that configures the auth system to use this AuthGorm instance.
-
-### Signing Key Operations
-
-#### `StoreNewSigningKey(kp *auth.KeyPairWithCreationTime) error`
-Stores a new ECDSA signing key in the database.
-
-#### `GetSigningKeyByID(keyID uuid.UUID) (*auth.KeyPairWithCreationTime, error)`
-Retrieves a signing key by its ID.
-
-#### `DeleteSigningKeysByIDs(keyIDs []uuid.UUID) error`
-Deletes multiple signing keys by their IDs. Returns `ErrNotAllKeysDeleted` if not all keys were deleted.
-
-### User Operations
-
-#### `GetPasswordForUserSubject(userSubject string) (string, error)`
-Retrieves the hashed password for a user by their subject identifier.
-
-### Refresh Token Operations
-
-#### `StoreNewRefreshToken(rt *auth.RefreshToken) error`
-Stores a new refresh token in the database.
-
-#### `GetRefreshTokenByID(tokenID uuid.UUID) (*auth.RefreshToken, error)`
-Retrieves a refresh token by its ID.
-
-#### `DeleteRefreshTokenByID(tokenID uuid.UUID) error`
-Deletes a refresh token by its ID (used for logout/revocation).
-
-## Error Handling
-
-The library provides the following sentinel errors:
-
-- **`ErrNotAllKeysDeleted`**: Returned when a delete operation fails to delete all requested signing keys
-
-## Database Support
-
-AuthGorm works with any database supported by GORM:
-
-- PostgreSQL
-- MySQL
-- SQLite
-- SQL Server
-- And more...
-
-Simply provide the appropriate GORM database connection when creating the AuthGorm instance.
+- [Wiki](wiki/Home.md): [Getting Started](wiki/Getting-Started.md), [Schema](wiki/Schema.md), [Databases and Concurrency](wiki/Databases-and-Concurrency.md), [Passkeys](wiki/Passkeys.md), [Migrating from v0.1](wiki/Migrating-from-v0.1.md)
+- [Examples](examples/): a SQLite walkthrough and a multi-instance PostgreSQL HTTP API, plus a browser passkey demo in [`passkeygorm/examples/server`](passkeygorm/examples/server/)
+- API reference: `go doc github.com/tpyle/authgorm`
 
 ## Testing
 
-The library includes comprehensive tests using SQLite in-memory databases:
-
 ```bash
 go test ./...
+(cd passkeygorm && go test ./...)
 ```
 
-## Dependencies
+The repository holds two Go modules, so test each one. The tests use SQLite. To run them against PostgreSQL as well, point `AUTHGORM_TEST_POSTGRES_DSN` at a database the tests may drop tables in:
 
-- [gorm.io/gorm](https://gorm.io/) - The ORM library
-- [github.com/tpyle/auth](https://github.com/tpyle/auth) - The authentication library
-- [github.com/google/uuid](https://github.com/google/uuid) - UUID support
+```bash
+export AUTHGORM_TEST_POSTGRES_DSN="host=localhost user=postgres password=postgres dbname=authgorm_test sslmode=disable"
+go test -race ./... && (cd passkeygorm && go test -race ./...)
+```
 
 ## License
 
-This project's license can be found in the LICENSE file.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
+See [LICENSE](LICENSE).

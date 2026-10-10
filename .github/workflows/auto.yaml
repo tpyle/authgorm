@@ -8,25 +8,77 @@ on:
     branches:
       - trunk
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
-    name: Test and Lint
+    name: Test (${{ matrix.module }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every Go module in the repository. Keep in sync with dependabot.yml.
+        module:
+          - .
+          - passkeygorm
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: authgorm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AUTHGORM_TEST_POSTGRES_DSN: host=localhost user=postgres password=postgres dbname=authgorm_test sslmode=disable
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: "**/go.sum"
 
-      - name: Install dependencies
-        run: go mod tidy
+      - name: Check go.mod and go.sum are tidy
+        run: go mod tidy -diff
 
-      - name: Run tests
-        run: go test ./...
-
-      - name: Run lint
+      - name: Vet
         run: go vet ./...
 
-      - name: Run coverage
-        run: go test -coverprofile=coverage.out ./...
+      # -p 1: test packages share the PostgreSQL database.
+      - name: Test
+        run: go test -race -p 1 -coverprofile=coverage.out ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+          working-directory: ${{ matrix.module }}
+
+  # Reports the combined result of the per-module jobs under one name, so a
+  # branch ruleset can require "Test and Lint" without listing every module.
+  # It runs even when a module job fails, because a skipped required check
+  # would count as passing.
+  result:
+    runs-on: ubuntu-latest
+    name: Test and Lint
+    needs: test
+    if: always()
+    steps:
+      - name: Check all modules passed
+        env:
+          RESULT: ${{ needs.test.result }}
+        run: |
+          echo "Module jobs: $RESULT"
+          test "$RESULT" = "success"
