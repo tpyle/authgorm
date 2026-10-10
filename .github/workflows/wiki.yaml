@@ -40,8 +40,14 @@ jobs:
         run: |
           find wiki-repo -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
           cp wiki/*.md wiki-repo/
-          # GitHub wiki links omit the .md extension used for in-repo browsing.
-          sed -i -E 's/\]\(([A-Za-z0-9_-]+)\.md(#[^)]*)?\)/](\1\2)/g' wiki-repo/*.md
+          # Links between pages drop the .md extension used for in-repo
+          # browsing. Links into the repository (../path) become absolute,
+          # since the wiki is served from a different URL.
+          base="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}"
+          sed -i -E \
+            -e 's/\]\(([A-Za-z0-9._-]+)\.md(#[^)]*)?\)/](\1\2)/g' \
+            -e "s#\]\(\.\./([^)]*)\)#](${base}/\1)#g" \
+            wiki-repo/*.md
 
       - name: Push changes
         working-directory: wiki-repo
