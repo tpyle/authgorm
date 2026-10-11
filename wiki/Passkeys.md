@@ -53,7 +53,7 @@ ch, err := pk.BeginRegistration(ctx, subject)
 
 `BeginRegistration` returns `auth.ErrUserNotFound` for a subject without an identity.
 
-**Deleting an account:** call `passkeys.DeleteUser(ctx, subject)`. It deletes the identity and every credential registered to it. Also call `a.RevokeAllSessions(ctx, subject)`, and delete the user's `authgorm.User` row if there is one.
+**Deleting an account:** call `passkeys.DeleteUser(ctx, subject)`. It deletes the identity and every credential registered to it, including one from a registration that finishes at the same time. Also call `a.RevokeAllSessions(ctx, subject)`, and delete the user's `authgorm.User` row if there is one.
 
 **Signing up with only a passkey:** call `EnsureUser`, issue a session with `a.IssueTokenPair(ctx, subject, nil)`, then run registration with that token. No `authgorm.User` row is needed.
 
@@ -96,20 +96,21 @@ ch, err := pk.BeginRegistration(ctx, subject)
 
 ## How the contracts are met
 
-The passkey package requires some operations to be atomic. passkeygorm does each one with a single statement, so it needs no transactions or row locks:
+The passkey package requires some operations to be atomic. passkeygorm does most of them with a single statement. Only saving a credential and deleting a user use a short transaction with a row lock:
 
 | Requirement | Statement |
 |---|---|
 | A credential ID is unique across users (`ErrCredentialExists`) | `INSERT ... ON CONFLICT DO NOTHING`. If no row was inserted, the ID exists. |
+| A credential is never saved for a deleted user | `CreateCredential` locks the user's row (`SELECT ... FOR UPDATE`) before inserting, and `DeleteUser` deletes the user row before the credentials, in one transaction. Either the delete waits and then removes the new credential, or the registration waits and fails with `auth.ErrUserNotFound`. Otherwise a later user given the same subject could inherit the credential. |
 | The signature counter never decreases; `UserVerified` and `CloneWarning` never clear | `UPDATE ... SET sign_count = CASE WHEN sign_count < ? THEN ? ELSE sign_count END, user_verified = user_verified OR ?, clone_warning = clone_warning OR ?`. `last_used_at` is only set when the use has a time. |
 | Only the owner can delete a credential (`ErrCredentialNotFound`) | `DELETE ... WHERE id = ? AND subject = ?`. If no row was deleted, the credential wasn't the user's. |
 | A ceremony finishes at most once | Read the row, then `DELETE` it by ID. Only the caller whose delete removes the row gets the data. |
 
-These statements behave the same on PostgreSQL, SQLite and MySQL. The tests run every contract, including concurrent ceremony consumption and racing counter updates, against SQLite and PostgreSQL. For SQLite, use the connection options from [Databases and Concurrency](Databases-and-Concurrency.md#sqlite).
+These statements behave the same on PostgreSQL, SQLite and MySQL. SQLite has no row locks, but with `_txlock=immediate` its transactions run one at a time, which gives the same result. The tests run every contract, including concurrent ceremony consumption, racing counter updates and registrations racing account deletion, against SQLite and PostgreSQL. For SQLite, use the connection options from [Databases and Concurrency](Databases-and-Concurrency.md#sqlite).
 
 ## Expired ceremonies
 
-Every Begin call stores a ceremony that lives for `CeremonyTTL` (default 5 minutes). Abandoned ones are deleted automatically: at most once a minute per `Store`, `SaveCeremony` first deletes up to 1000 expired ceremonies. If it deleted a full batch, the next call deletes another one straight away, so a backlog clears quickly without slowing any single request much. The cleanup runs to completion even if the request is cancelled. A failed cleanup never fails the Begin, and is retried after the interval.
+Every Begin call stores a ceremony that lives for `CeremonyTTL` (default 5 minutes). Abandoned ones are deleted automatically: at most once a minute per `Store`, `SaveCeremony` first deletes up to 1000 expired ceremonies. If it deleted a full batch, the next call deletes another one straight away, so a backlog clears quickly without slowing any single request much. The cleanup isn't stopped if the request is cancelled, but gives up after 5 seconds. A failed cleanup never fails the Begin, and is retried after the interval.
 
 Options:
 

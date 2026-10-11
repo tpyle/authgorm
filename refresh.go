@@ -44,6 +44,11 @@ func (s *Store) CreateRefreshToken(ctx context.Context, rec auth.RefreshTokenRec
 			if fam.Revoked {
 				return fmt.Errorf("%w: family %s", auth.ErrTokenRevoked, rec.FamilyID)
 			}
+			// The revoke methods find tokens by their own subject and
+			// families by theirs, so the two must agree.
+			if fam.Subject != rec.Subject {
+				return fmt.Errorf("authgorm: token for %q cannot join family %s of %q", rec.Subject, rec.FamilyID, fam.Subject)
+			}
 			if expiresAt.After(fam.ExpiresAt) {
 				if err := tx.Model(&fam).Update("expires_at", expiresAt).Error; err != nil {
 					return err

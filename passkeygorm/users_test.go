@@ -192,11 +192,16 @@ func TestDeleteUserRollsBack(t *testing.T) {
 			t.Fatal(err)
 		}
 		mustCreateCredential(t, s, newCredential("alice"))
-		restore := failOn(t, db, "delete", User{}.TableName())
+		// The credentials are deleted last, so failing there must undo the
+		// deletion of the user.
+		restore := failOn(t, db, "delete", Credential{}.TableName())
 		err := s.DeleteUser(ctx, "alice")
 		restore()
 		if err == nil {
 			t.Fatal("DeleteUser succeeded despite the injected failure")
+		}
+		if _, err := s.LookupUser(ctx, "alice"); err != nil {
+			t.Errorf("user after failed delete: %v", err)
 		}
 		if creds, err := s.ListCredentials(ctx, "alice"); err != nil || len(creds) != 1 {
 			t.Errorf("credentials after failed delete = %d, %v; want 1", len(creds), err)

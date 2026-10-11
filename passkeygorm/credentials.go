@@ -2,10 +2,12 @@ package passkeygorm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 
 	"github.com/tpyle/auth/passkey"
+	"github.com/tpyle/auth/v2"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -31,7 +33,9 @@ func (s *Store) ListCredentials(ctx context.Context, subject string) ([]passkey.
 
 // CreateCredential implements [passkey.CredentialStore]. It fails with an
 // error wrapping [passkey.ErrCredentialExists] if any user already has a
-// credential with the same ID.
+// credential with the same ID, and with one wrapping [auth.ErrUserNotFound]
+// if c.Subject has no passkey user, for example because [Store.DeleteUser]
+// ran while the registration was in progress.
 func (s *Store) CreateCredential(ctx context.Context, c passkey.Credential) error {
 	if len(c.ID) == 0 {
 		return fmt.Errorf("passkeygorm: credential has no ID")
@@ -59,16 +63,32 @@ func (s *Store) CreateCredential(ctx context.Context, c passkey.Credential) erro
 	if row.Transports == nil {
 		row.Transports = []string{}
 	}
-	// ON CONFLICT DO NOTHING detects a duplicate ID the same way on every
-	// database, without parsing driver-specific errors.
-	res := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return passkey.ErrCredentialExists
-	}
-	return nil
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// DeleteUser deletes the user row before the credentials, so
+		// locking it here means either DeleteUser waits and then deletes
+		// this credential, or this insert waits and finds no user. A
+		// credential is never left behind under a deleted subject, where a
+		// later user with the same subject would inherit it.
+		var u User
+		err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).
+			Select("subject").Where("subject = ?", c.Subject).Take(&u).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("%w: %q has no passkey user", auth.ErrUserNotFound, c.Subject)
+		}
+		if err != nil {
+			return err
+		}
+		// ON CONFLICT DO NOTHING detects a duplicate ID the same way on
+		// every database, without parsing driver-specific errors.
+		res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return passkey.ErrCredentialExists
+		}
+		return nil
+	})
 }
 
 // RecordCredentialUse implements [passkey.CredentialStore]. A single UPDATE

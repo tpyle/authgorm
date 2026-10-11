@@ -15,11 +15,13 @@ import (
 // [WithCeremonyPurgeInterval] it first deletes one batch of expired
 // ceremonies, so a large backlog never delays a single request by much; if
 // the batch was full, the next call deletes another one. The purge is not
-// stopped by ctx being cancelled. A failed purge does not fail the call; it
-// is retried after the interval.
+// stopped by ctx being cancelled, but gives up after 5 seconds. A failed
+// purge does not fail the call; it is retried after the interval.
 func (s *Store) SaveCeremony(ctx context.Context, id uuid.UUID, data []byte, expiresAt time.Time) error {
 	if now, ok := s.purgeDue(); ok {
-		_, more, err := s.purgeBatch(context.WithoutCancel(ctx), now)
+		purgeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ceremonyPurgeTimeout)
+		_, more, err := s.purgeBatch(purgeCtx, now)
+		cancel()
 		if more && err == nil {
 			s.purgeAgainNow()
 		}

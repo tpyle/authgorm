@@ -619,3 +619,18 @@ func TestPurgeReportsStatementErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateRefreshTokenRejectsSubjectMismatch(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store, db *gorm.DB) {
+		login := loginRecord("alice", baseTime, time.Hour)
+		mustCreate(t, s, login)
+		child := childRecord(login, baseTime, time.Hour)
+		child.Subject = "bob"
+		if err := s.CreateRefreshToken(context.Background(), child); err == nil {
+			t.Fatal("token for bob joined alice's family")
+		}
+		if n := countRows(t, db, &RefreshToken{}); n != 1 {
+			t.Errorf("tokens = %d, want 1", n)
+		}
+	})
+}

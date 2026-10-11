@@ -23,6 +23,9 @@ const (
 	// defaultPurgeBatchSize is how many ceremonies each purge statement
 	// deletes.
 	defaultPurgeBatchSize = 1000
+	// ceremonyPurgeTimeout bounds how long SaveCeremony's purge can delay
+	// the request it runs in.
+	ceremonyPurgeTimeout = 5 * time.Second
 )
 
 // Store implements the passkey store interfaces on one GORM connection. It

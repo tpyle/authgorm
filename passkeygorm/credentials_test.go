@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tpyle/auth/passkey"
+	"github.com/tpyle/auth/v2"
 	"gorm.io/gorm"
 )
 
@@ -36,8 +37,13 @@ func newCredential(subject string) passkey.Credential {
 	}
 }
 
+// mustCreateCredential saves c, first giving its subject a passkey user if
+// it has none.
 func mustCreateCredential(t *testing.T, s *Store, c passkey.Credential) {
 	t.Helper()
+	if _, err := s.EnsureUser(context.Background(), c.Subject, "", ""); err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
 	if err := s.CreateCredential(context.Background(), c); err != nil {
 		t.Fatalf("CreateCredential: %v", err)
 	}
@@ -83,6 +89,9 @@ func TestCreateCredentialRejectsDuplicates(t *testing.T) {
 		c := newCredential("alice")
 		mustCreateCredential(t, s, c)
 
+		if _, err := s.EnsureUser(ctx, "bob", "", ""); err != nil {
+			t.Fatal(err)
+		}
 		dup := newCredential("bob")
 		dup.ID = c.ID
 		for _, d := range []passkey.Credential{c, dup} {
@@ -95,6 +104,58 @@ func TestCreateCredentialRejectsDuplicates(t *testing.T) {
 		}
 		if n := countRows(t, db, &Credential{}); n != 1 {
 			t.Errorf("credentials = %d, want 1", n)
+		}
+	})
+}
+
+func TestCreateCredentialRequiresUser(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store, db *gorm.DB) {
+		err := s.CreateCredential(context.Background(), newCredential("nobody"))
+		if !errors.Is(err, auth.ErrUserNotFound) {
+			t.Fatalf("err = %v, want ErrUserNotFound", err)
+		}
+		if n := countRows(t, db, &Credential{}); n != 0 {
+			t.Errorf("credentials = %d, want 0", n)
+		}
+	})
+}
+
+// TestCreateCredentialRacesDeleteUser checks that a registration finishing
+// while its user is deleted never leaves a credential behind.
+func TestCreateCredentialRacesDeleteUser(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store, db *gorm.DB) {
+		ctx := context.Background()
+		for range 20 {
+			if _, err := s.EnsureUser(ctx, "bob", "", ""); err != nil {
+				t.Fatal(err)
+			}
+			var createErr, deleteErr error
+			var wg sync.WaitGroup
+			wg.Go(func() { createErr = s.CreateCredential(ctx, newCredential("bob")) })
+			wg.Go(func() { deleteErr = s.DeleteUser(ctx, "bob") })
+			wg.Wait()
+			if deleteErr != nil {
+				t.Fatalf("DeleteUser: %v", deleteErr)
+			}
+			if createErr != nil && !errors.Is(createErr, auth.ErrUserNotFound) {
+				t.Fatalf("CreateCredential: %v", createErr)
+			}
+			if n := countRows(t, db, &Credential{}); n != 0 {
+				t.Fatalf("%d credentials left behind for a deleted user", n)
+			}
+		}
+	})
+}
+
+func TestCreateCredentialInsertError(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store, db *gorm.DB) {
+		if _, err := s.EnsureUser(context.Background(), "alice", "", ""); err != nil {
+			t.Fatal(err)
+		}
+		defer failOn(t, db, "create", Credential{}.TableName())()
+		err := s.CreateCredential(context.Background(), newCredential("alice"))
+		if err == nil || errors.Is(err, passkey.ErrCredentialExists) {
+			t.Fatalf("err = %v, want the injected failure", err)
 		}
 	})
 }

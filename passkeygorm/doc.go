@@ -34,11 +34,14 @@
 //
 // # Concurrency
 //
-// The store is safe for concurrent use and needs no locks or transactions
-// beyond single statements: credential uses are recorded with an UPDATE that
-// only ever raises the signature counter, and a ceremony is consumed by
-// whichever caller's DELETE removes it. For SQLite, open the database with
-// "_txlock=immediate" and a busy timeout, as for authgorm.
+// The store is safe for concurrent use. Most operations are single
+// statements: credential uses are recorded with an UPDATE that only ever
+// raises the signature counter, and a ceremony is consumed by whichever
+// caller's DELETE removes it. [Store.CreateCredential] and [Store.DeleteUser]
+// each run a short transaction that locks the user's row, so a registration
+// racing an account deletion cannot leave a credential behind. For SQLite,
+// open the database with "_txlock=immediate" and a busy timeout, as for
+// authgorm.
 //
 // # Maintenance
 //

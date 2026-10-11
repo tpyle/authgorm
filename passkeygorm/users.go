@@ -74,12 +74,15 @@ func (s *Store) EnsureUser(ctx context.Context, subject, name, displayName strin
 
 // DeleteUser deletes subject's WebAuthn identity and every credential
 // registered to it. Call it when deleting the account. Deleting an unknown
-// subject is not an error.
+// subject is not an error. A registration that finishes concurrently either
+// has its credential deleted too or fails with [auth.ErrUserNotFound].
 func (s *Store) DeleteUser(ctx context.Context, subject string) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("subject = ?", subject).Delete(&Credential{}).Error; err != nil {
+		// The user row goes first: deleting it locks it, which is what
+		// CreateCredential waits on (see there).
+		if err := tx.Where("subject = ?", subject).Delete(&User{}).Error; err != nil {
 			return err
 		}
-		return tx.Where("subject = ?", subject).Delete(&User{}).Error
+		return tx.Where("subject = ?", subject).Delete(&Credential{}).Error
 	})
 }
