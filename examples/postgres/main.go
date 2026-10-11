@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tpyle/auth/v2"
 	"github.com/tpyle/authgorm"
@@ -78,12 +79,27 @@ type refreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+// maxUsernameLength is the length of authgorm's user_subject column.
+const maxUsernameLength = 255
+
+// decode reads a JSON request body of at most 64 KiB into v.
+func decode(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	return json.NewDecoder(r.Body).Decode(v)
+}
+
 func routes(a *auth.Authorizer, store *authgorm.Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /register", func(w http.ResponseWriter, r *http.Request) {
 		var c credentials
-		if err := json.NewDecoder(r.Body).Decode(&c); err != nil || c.Username == "" || c.Password == "" {
+		if err := decode(w, r, &c); err != nil || c.Username == "" || c.Password == "" {
 			http.Error(w, "username and password required", http.StatusBadRequest)
+			return
+		}
+		// Checked before the expensive hash, and because the column holds
+		// at most 255 characters.
+		if utf8.RuneCountInString(c.Username) > maxUsernameLength {
+			http.Error(w, "username too long", http.StatusBadRequest)
 			return
 		}
 		hash, err := a.HashPassword(r.Context(), []byte(c.Password))
@@ -99,7 +115,7 @@ func routes(a *auth.Authorizer, store *authgorm.Store) http.Handler {
 	})
 	mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
 		var c credentials
-		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+		if err := decode(w, r, &c); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
@@ -112,7 +128,7 @@ func routes(a *auth.Authorizer, store *authgorm.Store) http.Handler {
 	})
 	mux.HandleFunc("POST /refresh", func(w http.ResponseWriter, r *http.Request) {
 		var req refreshRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decode(w, r, &req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
@@ -125,7 +141,7 @@ func routes(a *auth.Authorizer, store *authgorm.Store) http.Handler {
 	})
 	mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {
 		var req refreshRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decode(w, r, &req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}

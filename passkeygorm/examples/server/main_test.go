@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 
 	"uuid"
 
+	"github.com/tpyle/auth/passkey"
 	"github.com/tpyle/auth/v2"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -110,5 +113,28 @@ func TestServerRoutes(t *testing.T) {
 	}
 	if code, _ := do("POST", "/passkey/login/finish", "not json", ""); code != http.StatusBadRequest {
 		t.Errorf("login finish with bad JSON = %d", code)
+	}
+}
+
+func TestReplyStatuses(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"success", nil, http.StatusOK},
+		{"bad credentials", auth.ErrInvalidCredentials, http.StatusUnauthorized},
+		{"duplicate credential", passkey.ErrCredentialExists, http.StatusConflict},
+		{"deleted user", fmt.Errorf("wrapped: %w", auth.ErrUserNotFound), http.StatusNotFound},
+		{"other", errors.New("boom"), http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			reply(rec, httptest.NewRequest(http.MethodPost, "/", nil), map[string]string{}, tt.err)
+			if rec.Code != tt.want {
+				t.Errorf("status = %d, want %d", rec.Code, tt.want)
+			}
+		})
 	}
 }

@@ -214,6 +214,9 @@ func reply(w http.ResponseWriter, r *http.Request, v any, err error) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "try_again"})
 	case errors.Is(err, passkey.ErrCredentialExists):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "already_registered"})
+	case errors.Is(err, auth.ErrUserNotFound):
+		// For example, the account was deleted during registration.
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_user"})
 	case errors.Is(err, context.Canceled):
 		// Client went away; nothing useful to send.
 	default:

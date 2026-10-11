@@ -74,6 +74,15 @@ func TestRoutes(t *testing.T) {
 	if resp := post(t, srv, "/register", `{"username":"alice","password":"pw"}`); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("register: status = %d, want 201", resp.StatusCode)
 	}
+	if resp := post(t, srv, "/register", `{"username":"`+strings.Repeat("é", 256)+`","password":"pw"}`); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("long username: status = %d, want 400", resp.StatusCode)
+	}
+	if resp := post(t, srv, "/register", `{"username":"`+strings.Repeat("é", 255)+`","password":"pw"}`); resp.StatusCode != http.StatusCreated {
+		t.Errorf("255-character username: status = %d, want 201", resp.StatusCode)
+	}
+	if resp := post(t, srv, "/login", `{"username":"`+strings.Repeat("a", 1<<16)+`"}`); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("oversized body: status = %d, want 400", resp.StatusCode)
+	}
 	// Registering a taken username must not replace its password.
 	if resp := post(t, srv, "/register", `{"username":"alice","password":"stolen"}`); resp.StatusCode != http.StatusConflict {
 		t.Errorf("duplicate register: status = %d, want 409", resp.StatusCode)
