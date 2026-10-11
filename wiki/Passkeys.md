@@ -53,7 +53,7 @@ ch, err := pk.BeginRegistration(ctx, subject)
 
 `BeginRegistration` returns `auth.ErrUserNotFound` for a subject without an identity.
 
-**Deleting an account:** call `passkeys.DeleteUser(ctx, subject)`. It deletes the identity and every credential registered to it, including one from a registration that finishes at the same time. Also call `a.RevokeAllSessions(ctx, subject)`, and delete the user's `authgorm.User` row if there is one.
+**Deleting an account:** call `passkeys.DeleteUser(ctx, subject)`. It deletes the identity and every credential registered to it, including one from a registration that finishes at the same time. Also delete the user's `authgorm.User` row if there is one, then call `a.RevokeAllSessions(ctx, subject)`. Revoke last, so a login that happens during the deletion can't create a session after the revocation.
 
 **Signing up with only a passkey:** call `EnsureUser`, issue a session with `a.IssueTokenPair(ctx, subject, nil)`, then run registration with that token. No `authgorm.User` row is needed.
 

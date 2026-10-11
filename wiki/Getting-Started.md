@@ -65,6 +65,17 @@ case err != nil:
 
 The `User` model is exported, so you can work with the table through GORM directly, for example to add your own columns in a separate table keyed by `User.ID`, or to delete users. `User` embeds `gorm.Model`, so `db.Delete` is a soft delete: the user can no longer log in, but the username stays taken until the row is removed with `db.Unscoped().Delete`.
 
+Deleting a user, soft or hard, does not end their sessions: refresh tokens are not tied to the `users` table, because users who sign in only with passkeys have no row there. Revoke the user's sessions after deleting them. Deleting first means a login that happens at the same time fails, instead of creating a session after the revocation:
+
+```go
+if err := db.Where("user_subject = ?", username).Delete(&authgorm.User{}).Error; err != nil {
+	return err
+}
+err := a.RevokeAllSessions(ctx, username)
+```
+
+Access tokens already issued stay valid until they expire (`AccessTokenTTL`, default 15 minutes), as with any revocation.
+
 When a user logs in with a hash whose Argon2 parameters are out of date, the `Authorizer` calls `UpdatePasswordHash` to store a new one. The store updates the row only if it still holds the hash that was verified, so a concurrent password change is never undone.
 
 ## Log in, refresh, log out

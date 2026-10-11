@@ -63,6 +63,8 @@ err := db.Migrator().DropTable("refresh_tokens", "signing_keys")
 
 Drop `refresh_tokens` first, because it has a foreign key to `users`.
 
+That foreign key also deleted a user's refresh tokens when the user was hard-deleted. v0.2 has no such link, so code that deletes users must now call `a.RevokeAllSessions(ctx, username)` after deleting them. Otherwise the deleted user can keep refreshing their session until it expires. See [Getting Started](Getting-Started.md#register-users).
+
 ## Rolling upgrade
 
 v0.1 and v0.2 use different tables for keys and refresh tokens, so they can run against the same database at the same time. Tokens issued by one version are not accepted by the other, though. Upgrade every instance together, during a quiet period if possible.

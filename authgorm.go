@@ -59,7 +59,9 @@ func (s *Store) Options() []auth.Option {
 	}
 }
 
-// User is a row of the "users" table.
+// User is a row of the "users" table. Refresh tokens are not linked to it,
+// so deleting a user does not end their sessions; call
+// Authorizer.RevokeAllSessions after deleting the user.
 type User struct {
 	gorm.Model
 
