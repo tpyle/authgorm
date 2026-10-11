@@ -74,6 +74,13 @@ func TestRoutes(t *testing.T) {
 	if resp := post(t, srv, "/register", `{"username":"alice","password":"pw"}`); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("register: status = %d, want 201", resp.StatusCode)
 	}
+	// Registering a taken username must not replace its password.
+	if resp := post(t, srv, "/register", `{"username":"alice","password":"stolen"}`); resp.StatusCode != http.StatusConflict {
+		t.Errorf("duplicate register: status = %d, want 409", resp.StatusCode)
+	}
+	if resp := post(t, srv, "/login", `{"username":"alice","password":"stolen"}`); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("login with the second password: status = %d, want 401", resp.StatusCode)
+	}
 	if resp := post(t, srv, "/login", `{"username":"alice","password":"nope"}`); resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("bad login: status = %d, want 401", resp.StatusCode)
 	}

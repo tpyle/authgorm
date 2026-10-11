@@ -109,7 +109,7 @@ These statements behave the same on PostgreSQL, SQLite and MySQL. The tests run 
 
 ## Expired ceremonies
 
-Every Begin call stores a ceremony that lives for `CeremonyTTL` (default 5 minutes). Abandoned ones are deleted automatically: `SaveCeremony` first deletes expired ceremonies, at most once a minute per `Store`. A failed cleanup is retried on a later call and never fails the Begin.
+Every Begin call stores a ceremony that lives for `CeremonyTTL` (default 5 minutes). Abandoned ones are deleted automatically: at most once a minute per `Store`, `SaveCeremony` first deletes up to 1000 expired ceremonies. If it deleted a full batch, the next call deletes another one straight away, so a backlog clears quickly without slowing any single request much. The cleanup runs to completion even if the request is cancelled. A failed cleanup never fails the Begin, and is retried after the interval.
 
 Options:
 
@@ -120,7 +120,7 @@ passkeygorm.New(db,
 )
 ```
 
-With the automatic cleanup disabled, call `store.PurgeExpiredCeremonies(ctx, time.Now())` yourself. It deletes in batches of 1000.
+With the automatic cleanup disabled, call `store.PurgeExpiredCeremonies(ctx, time.Now())` yourself. It deletes every expired ceremony, in batches of 1000.
 
 `BeginLogin` needs no authentication, so **rate-limit the Begin endpoints**. Otherwise anonymous clients can fill the ceremony table faster than it's cleaned.
 

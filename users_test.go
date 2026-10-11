@@ -3,6 +3,8 @@ package authgorm
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/tpyle/auth/v2"
@@ -72,8 +74,18 @@ func TestLookupPasswordHashSoftDeleted(t *testing.T) {
 			t.Fatalf("err = %v, want ErrUserNotFound", err)
 		}
 		// The name stays taken until the row is deleted permanently.
-		if err := s.SetPasswordHash(ctx, "alice", "new"); err == nil {
-			t.Fatal("SetPasswordHash on a soft-deleted username succeeded")
+		if err := s.SetPasswordHash(ctx, "alice", "new"); !errors.Is(err, ErrUserExists) {
+			t.Fatalf("SetPasswordHash on a soft-deleted username: err = %v, want ErrUserExists", err)
+		}
+		if err := s.CreateUser(ctx, "alice", "new"); !errors.Is(err, ErrUserExists) {
+			t.Fatalf("CreateUser on a soft-deleted username: err = %v, want ErrUserExists", err)
+		}
+		var u User
+		if err := db.Unscoped().Where("user_subject = ?", "alice").Take(&u).Error; err != nil {
+			t.Fatal(err)
+		}
+		if u.HashedPassword != "hash" || !u.DeletedAt.Valid {
+			t.Errorf("soft-deleted row changed: hash %q, deleted %v", u.HashedPassword, u.DeletedAt.Valid)
 		}
 		if err := db.Unscoped().Where("user_subject = ?", "alice").Delete(&User{}).Error; err != nil {
 			t.Fatal(err)
@@ -108,6 +120,92 @@ func TestSetPasswordHash(t *testing.T) {
 		}
 		if n := countRows(t, db, &User{}); n != 2 {
 			t.Errorf("users = %d, want 2", n)
+		}
+	})
+}
+
+func TestCreateUser(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store, db *gorm.DB) {
+		ctx := context.Background()
+		if err := s.CreateUser(ctx, "alice", "first"); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := s.CreateUser(ctx, "alice", "second"); !errors.Is(err, ErrUserExists) {
+			t.Fatalf("duplicate: err = %v, want ErrUserExists", err)
+		}
+		if err := s.CreateUser(ctx, "bob", "other"); err != nil {
+			t.Fatalf("create bob: %v", err)
+		}
+		if got, _ := s.LookupPasswordHash(ctx, "alice"); got != "first" {
+			t.Errorf("alice hash = %q, want first (not replaced)", got)
+		}
+		if n := countRows(t, db, &User{}); n != 2 {
+			t.Errorf("users = %d, want 2", n)
+		}
+	})
+}
+
+// TestConcurrentUserCreation checks that racing calls for a new username
+// neither create duplicates nor fail on the unique index.
+func TestConcurrentUserCreation(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store, db *gorm.DB) {
+		ctx := context.Background()
+		const callers = 8
+		for round := range 5 {
+			setName, createName := fmt.Sprintf("set%d", round), fmt.Sprintf("create%d", round)
+			setErrs := make([]error, callers)
+			createErrs := make([]error, callers)
+			var wg sync.WaitGroup
+			for i := range callers {
+				wg.Go(func() { setErrs[i] = s.SetPasswordHash(ctx, setName, fmt.Sprintf("hash%d", i)) })
+				wg.Go(func() { createErrs[i] = s.CreateUser(ctx, createName, fmt.Sprintf("hash%d", i)) })
+			}
+			wg.Wait()
+
+			for _, err := range setErrs {
+				if err != nil {
+					t.Fatalf("SetPasswordHash: %v", err)
+				}
+			}
+			created := 0
+			for _, err := range createErrs {
+				switch {
+				case err == nil:
+					created++
+				case !errors.Is(err, ErrUserExists):
+					t.Fatalf("CreateUser: %v", err)
+				}
+			}
+			if created != 1 {
+				t.Fatalf("%d CreateUser calls succeeded, want 1", created)
+			}
+		}
+		if n := countRows(t, db, &User{}); n != 10 {
+			t.Errorf("users = %d, want 10", n)
+		}
+	})
+}
+
+func TestSetPasswordHashErrors(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store, db *gorm.DB) {
+		ctx := context.Background()
+		if err := s.SetPasswordHash(ctx, "alice", "a"); err != nil {
+			t.Fatal(err)
+		}
+		restore := failOn(t, db, "update", "users")
+		if err := s.SetPasswordHash(ctx, "alice", "b"); err == nil {
+			t.Error("SetPasswordHash succeeded despite a failed update")
+		}
+		restore()
+
+		// The check for a soft-deleted user reports its own failure.
+		if err := db.Where("user_subject = ?", "alice").Delete(&User{}).Error; err != nil {
+			t.Fatal(err)
+		}
+		defer failOn(t, db, "query", "users")()
+		err := s.SetPasswordHash(ctx, "alice", "c")
+		if err == nil || errors.Is(err, ErrUserExists) {
+			t.Errorf("err = %v, want the injected failure", err)
 		}
 	})
 }
@@ -167,6 +265,9 @@ func TestUserMethodsReportDatabaseErrors(t *testing.T) {
 	}
 	if err := s.SetPasswordHash(ctx, "alice", "a"); err == nil {
 		t.Error("SetPasswordHash succeeded on a closed database")
+	}
+	if err := s.CreateUser(ctx, "alice", "a"); err == nil || errors.Is(err, ErrUserExists) {
+		t.Errorf("CreateUser err = %v, want a database error", err)
 	}
 	if err := s.Migrate(ctx); err == nil {
 		t.Error("Migrate succeeded on a closed database")

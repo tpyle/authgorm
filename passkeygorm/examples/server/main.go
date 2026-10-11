@@ -97,15 +97,14 @@ func newApp(ctx context.Context, db *gorm.DB, origin string, opts ...auth.Option
 
 // seed creates a password user unless it already exists.
 func (app *app) seed(ctx context.Context, username, password string) error {
-	_, err := app.users.LookupPasswordHash(ctx, username)
-	if !errors.Is(err, auth.ErrUserNotFound) {
-		return err
-	}
 	hash, err := app.auth.HashPassword(ctx, []byte(password))
 	if err != nil {
 		return err
 	}
-	return app.users.SetPasswordHash(ctx, username, hash)
+	if err := app.users.CreateUser(ctx, username, hash); !errors.Is(err, authgorm.ErrUserExists) {
+		return err
+	}
+	return nil
 }
 
 func (app *app) routes() http.Handler {

@@ -91,9 +91,7 @@ func routes(a *auth.Authorizer, store *authgorm.Store) http.Handler {
 			writeError(w, err)
 			return
 		}
-		// A real service would reject existing usernames instead of
-		// replacing their password.
-		if err := store.SetPasswordHash(r.Context(), c.Username, hash); err != nil {
+		if err := store.CreateUser(r.Context(), c.Username, hash); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -154,6 +152,8 @@ func writeError(w http.ResponseWriter, err error) {
 		errors.Is(err, auth.ErrTokenRevoked),
 		errors.Is(err, auth.ErrRefreshTokenReused):
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	case errors.Is(err, authgorm.ErrUserExists):
+		http.Error(w, "username taken", http.StatusConflict)
 	default:
 		log.Printf("internal error: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

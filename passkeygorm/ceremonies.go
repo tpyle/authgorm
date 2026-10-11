@@ -12,11 +12,17 @@ import (
 )
 
 // SaveCeremony implements [passkey.CeremonyStore]. At most once per
-// [WithCeremonyPurgeInterval] it first deletes expired ceremonies. A failed
-// purge does not fail the call; it is retried on a later one.
+// [WithCeremonyPurgeInterval] it first deletes one batch of expired
+// ceremonies, so a large backlog never delays a single request by much; if
+// the batch was full, the next call deletes another one. The purge is not
+// stopped by ctx being cancelled. A failed purge does not fail the call; it
+// is retried after the interval.
 func (s *Store) SaveCeremony(ctx context.Context, id uuid.UUID, data []byte, expiresAt time.Time) error {
 	if now, ok := s.purgeDue(); ok {
-		_, _ = s.PurgeExpiredCeremonies(ctx, now)
+		_, more, err := s.purgeBatch(context.WithoutCancel(ctx), now)
+		if more && err == nil {
+			s.purgeAgainNow()
+		}
 	}
 	row := Ceremony{ID: id.String(), Data: data, ExpiresAt: expiresAt.UTC()}
 	return s.db.WithContext(ctx).Create(&row).Error
@@ -48,25 +54,32 @@ func (s *Store) ConsumeCeremony(ctx context.Context, id uuid.UUID, now time.Time
 
 // PurgeExpiredCeremonies deletes ceremonies that expired before now, in
 // batches of 1000, and returns how many it deleted. [Store.SaveCeremony]
-// calls it periodically; call it directly to purge on your own schedule.
+// purges periodically; call this to purge on your own schedule instead.
 func (s *Store) PurgeExpiredCeremonies(ctx context.Context, now time.Time) (int64, error) {
-	db := s.db.WithContext(ctx)
-	now = now.UTC()
 	var total int64
 	for {
-		// Selecting IDs first is portable; DELETE ... LIMIT is not.
-		var ids []string
-		err := db.Model(&Ceremony{}).Where("expires_at < ?", now).Limit(s.purgeBatchSize).Pluck("id", &ids).Error
-		if err != nil || len(ids) == 0 {
+		n, more, err := s.purgeBatch(ctx, now)
+		total += n
+		if err != nil || !more {
 			return total, err
 		}
-		res := db.Where("id IN ?", ids).Delete(&Ceremony{})
-		total += res.RowsAffected
-		// A batch that deletes nothing would be selected again forever.
-		if res.Error != nil || len(ids) < s.purgeBatchSize || res.RowsAffected == 0 {
-			return total, res.Error
-		}
 	}
+}
+
+// purgeBatch deletes up to one batch of ceremonies that expired before now.
+// It reports how many it deleted and whether more may remain.
+func (s *Store) purgeBatch(ctx context.Context, now time.Time) (int64, bool, error) {
+	db := s.db.WithContext(ctx)
+	// Selecting IDs first is portable; DELETE ... LIMIT is not.
+	var ids []string
+	err := db.Model(&Ceremony{}).Where("expires_at < ?", now.UTC()).Limit(s.purgeBatchSize).Pluck("id", &ids).Error
+	if err != nil || len(ids) == 0 {
+		return 0, false, err
+	}
+	res := db.Where("id IN ?", ids).Delete(&Ceremony{})
+	// A batch that deletes nothing would be selected again forever.
+	more := res.Error == nil && len(ids) == s.purgeBatchSize && res.RowsAffected > 0
+	return res.RowsAffected, more, res.Error
 }
 
 // purgeDue reports whether SaveCeremony should purge now, and if so records
@@ -83,4 +96,12 @@ func (s *Store) purgeDue() (time.Time, bool) {
 	}
 	s.lastPurge = now
 	return now, true
+}
+
+// purgeAgainNow makes the next SaveCeremony purge without waiting for the
+// interval, because the last purge left a backlog.
+func (s *Store) purgeAgainNow() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastPurge = time.Time{}
 }

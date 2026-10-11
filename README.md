@@ -43,7 +43,8 @@ func main() {
 	}
 	defer a.Close()
 
-	// Register a user.
+	// Create or replace a user. Sign-up handlers should use CreateUser,
+	// which never replaces an existing user.
 	hash, err := a.HashPassword(ctx, []byte("correct horse battery staple"))
 	if err != nil {
 		log.Fatal(err)

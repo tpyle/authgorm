@@ -68,6 +68,8 @@ func nullableTime(t time.Time) *time.Time {
 	return &u
 }
 
+// uuidStrings returns the string form of each ID, as stored in the id
+// columns.
 func uuidStrings(ids []uuid.UUID) []string {
 	out := make([]string, len(ids))
 	for i, id := range ids {

@@ -42,8 +42,8 @@
 //
 // # Maintenance
 //
-// Expired ceremonies are deleted by [Store.SaveCeremony], at most once a
-// minute per Store (see [WithCeremonyPurgeInterval]), so abandoned
-// ceremonies do not accumulate. [Store.PurgeExpiredCeremonies] purges on
-// demand.
+// Expired ceremonies are deleted by [Store.SaveCeremony], one batch at a
+// time and at most once a minute per Store unless a backlog remains (see
+// [WithCeremonyPurgeInterval]), so abandoned ceremonies do not accumulate.
+// [Store.PurgeExpiredCeremonies] purges everything on demand.
 package passkeygorm

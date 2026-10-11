@@ -23,6 +23,8 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     name: Publish wiki
+    # The wiki has no branches, so only trunk may publish to it.
+    if: github.ref == 'refs/heads/trunk'
     steps:
       - name: Checkout code
         uses: actions/checkout@v7

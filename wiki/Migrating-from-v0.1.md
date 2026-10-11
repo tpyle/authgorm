@@ -23,6 +23,7 @@ authgorm v0.1 implemented the callback options of auth v1. v0.2 implements the s
 | `auth.Create(ag.AsOptions(), ...)` | `auth.New(ctx, append(store.Options(), ...)...)` |
 | `GetPasswordForUserSubject(subject)` | `LookupPasswordHash(ctx, username)`. Returns an error wrapping `auth.ErrUserNotFound` for unknown users instead of `gorm.ErrRecordNotFound`. |
 | (none) | `UpdatePasswordHash(ctx, username, oldHash, newHash)`: compare-and-swap, used for automatic hash upgrades |
+| (none) | `CreateUser(ctx, username, hash)`: create a user, or fail with `ErrUserExists` if the username is taken |
 | (none) | `SetPasswordHash(ctx, username, hash)`: create or replace a user |
 | `StoreNewSigningKey(kp)` | `StoreKey(ctx, key)` |
 | `GetSigningKeyByID(id)` | `ListKeys(ctx)` (auth v2 caches the whole key set) |

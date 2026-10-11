@@ -169,6 +169,8 @@ func lockSubject(tx *gorm.DB, subject string) error {
 	}).Create(&RefreshSubject{Subject: subject, LockedAt: time.Now().UTC()}).Error
 }
 
+// findRefreshToken loads a token row by ID. A missing row is reported as
+// an error wrapping [auth.ErrRefreshTokenNotFound].
 func findRefreshToken(db *gorm.DB, id uuid.UUID) (RefreshToken, error) {
 	var row RefreshToken
 	err := db.Where("id = ?", id.String()).Take(&row).Error

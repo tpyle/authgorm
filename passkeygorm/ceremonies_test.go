@@ -179,6 +179,70 @@ func TestSaveCeremonyPurgesPeriodically(t *testing.T) {
 	})
 }
 
+// insertExpired adds n ceremonies that expired before baseTime, without
+// going through SaveCeremony and its purge.
+func insertExpired(t *testing.T, db *gorm.DB, n int) {
+	t.Helper()
+	for i := range n {
+		row := Ceremony{ID: uuid.New().String(), Data: []byte("x"), ExpiresAt: baseTime.Add(-time.Duration(i+1) * time.Second)}
+		if err := db.Create(&row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func countExpired(t *testing.T, db *gorm.DB) int64 {
+	t.Helper()
+	var n int64
+	if err := db.Model(&Ceremony{}).Where("expires_at < ?", baseTime).Count(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestSaveCeremonyPurgesOneBatchPerCall checks that a backlog is deleted a
+// batch per call, without waiting for the interval between batches.
+func TestSaveCeremonyPurgesOneBatchPerCall(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store, db *gorm.DB) {
+		ctx := context.Background()
+		clock := &fakeClock{now: baseTime}
+		s.now = clock.Now
+		s.purgeBatchSize = 2
+		insertExpired(t, db, 5)
+
+		for _, want := range []int64{3, 1, 0, 0} {
+			if err := s.SaveCeremony(ctx, uuid.New(), []byte("live"), baseTime.Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			if got := countExpired(t, db); got != want {
+				t.Fatalf("expired ceremonies = %d, want %d", got, want)
+			}
+		}
+		// The backlog is gone, so the interval applies again.
+		insertExpired(t, db, 1)
+		if err := s.SaveCeremony(ctx, uuid.New(), []byte("live"), baseTime.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if got := countExpired(t, db); got != 1 {
+			t.Fatalf("expired ceremonies = %d, want 1 (purged within the interval)", got)
+		}
+	})
+}
+
+func TestSaveCeremonyPurgeOutlivesCanceledRequest(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store, db *gorm.DB) {
+		insertExpired(t, db, 3)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := s.SaveCeremony(ctx, uuid.New(), []byte("x"), baseTime.Add(time.Hour)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		if got := countExpired(t, db); got != 0 {
+			t.Errorf("expired ceremonies = %d, want 0", got)
+		}
+	})
+}
+
 func TestSaveCeremonyPurgeCanBeDisabled(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store, db *gorm.DB) {
 		ctx := context.Background()

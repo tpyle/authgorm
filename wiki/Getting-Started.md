@@ -44,19 +44,24 @@ If you only want some of the stores in the database, pass them individually inst
 
 ## Register users
 
-The store reads users but leaves registration to you. `SetPasswordHash` creates a user, or replaces the hash of an existing one:
+The store reads users but leaves registration to you. Hash the password, then store it with `CreateUser`:
 
 ```go
 hash, err := a.HashPassword(ctx, []byte(password))
 if err != nil {
 	return err
 }
-if err := store.SetPasswordHash(ctx, username, hash); err != nil {
+switch err := store.CreateUser(ctx, username, hash); {
+case errors.Is(err, authgorm.ErrUserExists):
+	// The username is taken: reject the sign-up.
+case err != nil:
 	return err
 }
 ```
 
-`SetPasswordHash` does not check whether the user already exists, so a sign-up handler should check first (for example by calling `LookupPasswordHash` and expecting `auth.ErrUserNotFound`) to avoid overwriting someone's password. The unique index on the username stops two concurrent sign-ups from creating duplicates: the second one fails.
+`CreateUser` never replaces an existing user, so use it in sign-up handlers. A single insert both checks the name and claims it, so if two people sign up with the same username at once, exactly one succeeds. Soft-deleted users keep their usernames (see below).
+
+`SetPasswordHash(ctx, username, hash)` creates the user or replaces an existing user's hash. Use it for password resets, admin tools and seeding, never for an unauthenticated sign-up, where it would let anyone overwrite someone else's password. When a password is changed or reset, also call `a.RevokeAllSessions(ctx, username)` to sign out existing sessions.
 
 The `User` model is exported, so you can work with the table through GORM directly, for example to add your own columns in a separate table keyed by `User.ID`, or to delete users. `User` embeds `gorm.Model`, so `db.Delete` is a soft delete: the user can no longer log in, but the username stays taken until the row is removed with `db.Unscoped().Delete`.
 
